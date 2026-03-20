@@ -1,4 +1,4 @@
-# claude-memory-sync
+# 「我不是說過了嗎」-- Claude 記憶同步
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Shell](https://img.shields.io/badge/Shell-Bash-green.svg)](https://www.gnu.org/software/bash/)

@@ -1,4 +1,4 @@
-# claude-memory-sync
+# "Wait, I already told you this" -- Claude Memory Sync
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Shell](https://img.shields.io/badge/Shell-Bash-green.svg)](https://www.gnu.org/software/bash/)
