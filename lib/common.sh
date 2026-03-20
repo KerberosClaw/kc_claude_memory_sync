@@ -109,8 +109,17 @@ load_config() {
     REMOTE="$HUB_USER@$HUB_HOST"
 }
 
-# Check if hub is reachable via SSH
+# Check if hub is reachable
+# If git remote is a local path (hub machine), always reachable.
+# If git remote is SSH, check via SSH connection.
 hub_reachable() {
+    local remote_url
+    remote_url=$(git -C "$LOCAL_REPO" remote get-url origin 2>/dev/null || true)
+    # Local path (starts with / or ~) → always reachable
+    if [[ "$remote_url" == /* ]] || [[ "$remote_url" == ~* ]]; then
+        return 0
+    fi
+    # SSH remote → check connection
     $SSH_CMD "$REMOTE" "true" 2>/dev/null
 }
 
