@@ -13,21 +13,43 @@ ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
-# Parse YAML config using python3 (no external deps)
+# Parse simple YAML config using pure python3 (no PyYAML dependency)
+# Supports only flat nested keys like hub.host, ssh.timeout, etc.
 # Usage: parse_yaml config.yaml "hub.host"
 parse_yaml() {
     local file="$1"
     local key="$2"
     python3 -c "
-import yaml, sys
-with open('$file') as f:
-    d = yaml.safe_load(f)
-keys = '$key'.split('.')
-for k in keys:
-    if d is None:
-        break
-    d = d.get(k)
-print(d if d is not None else '')
+import re, sys
+
+def parse_simple_yaml(filepath):
+    result = {}
+    current_section = None
+    with open(filepath) as f:
+        for line in f:
+            line = line.rstrip()
+            if not line or line.lstrip().startswith('#'):
+                continue
+            # Top-level key (no leading whitespace)
+            m = re.match(r'^(\w+):\s*$', line)
+            if m:
+                current_section = m.group(1)
+                continue
+            # Nested key-value
+            m = re.match(r'^\s+(\w+):\s+(.+)$', line)
+            if m and current_section:
+                val = m.group(2).strip()
+                # Remove surrounding quotes
+                if (val.startswith('\"') and val.endswith('\"')) or \
+                   (val.startswith(\"'\") and val.endswith(\"'\")):
+                    val = val[1:-1]
+                # Remove inline comments
+                val = re.sub(r'\s+#.*$', '', val)
+                result[current_section + '.' + m.group(1)] = val
+    return result
+
+data = parse_simple_yaml('$file')
+print(data.get('$key', ''))
 " 2>/dev/null
 }
 
@@ -46,8 +68,12 @@ load_config() {
     else
         CONFIG_FILE=""
         for dir in "${search_dirs[@]}"; do
+            # Check config.yaml (project dir) and .config.yaml (memory repo)
             if [ -f "$dir/config.yaml" ]; then
                 CONFIG_FILE="$dir/config.yaml"
+                break
+            elif [ -f "$dir/.config.yaml" ]; then
+                CONFIG_FILE="$dir/.config.yaml"
                 break
             fi
         done
@@ -65,10 +91,14 @@ load_config() {
     LOCAL_REPO=$(parse_yaml "$CONFIG_FILE" "sync.local_repo")
     LOCAL_MEMORY_DIR=$(parse_yaml "$CONFIG_FILE" "sync.memory_dir")
 
-    # Expand ~ in paths
-    SSH_KEY=$(eval echo "$SSH_KEY")
-    LOCAL_REPO=$(eval echo "$LOCAL_REPO")
-    HUB_BARE_REPO=$(eval echo "$HUB_BARE_REPO")
+    # Keep raw bare_repo path for SSH remote operations (~ expands on remote)
+    HUB_BARE_REPO_RAW="$HUB_BARE_REPO"
+
+    # Expand ~ in local paths only
+    SSH_KEY="${SSH_KEY/#\~/$HOME}"
+    LOCAL_REPO="${LOCAL_REPO/#\~/$HOME}"
+    # HUB_BARE_REPO: expand ~ for local use (init-hub), keep RAW for remote (join)
+    HUB_BARE_REPO="${HUB_BARE_REPO/#\~/$HOME}"
 
     # Defaults
     SSH_TIMEOUT="${SSH_TIMEOUT:-3}"
@@ -88,25 +118,33 @@ hub_reachable() {
 # Usage: acquire_lock || exit 0
 acquire_lock() {
     local lock_file="${LOCAL_REPO}/.sync.lock"
+
     if command -v flock >/dev/null 2>&1; then
+        # Linux: fd-based lock, auto-releases on exit
         exec 200>"$lock_file"
         flock -n 200 || return 1
-    elif command -v shlock >/dev/null 2>&1; then
-        shlock -f "$lock_file" -p $$ || return 1
     else
-        # Fallback: simple mkdir-based lock
-        if ! mkdir "$lock_file.d" 2>/dev/null; then
-            # Check if lock is stale (older than 60 seconds)
-            if [ -d "$lock_file.d" ]; then
-                local lock_age=$(( $(date +%s) - $(stat -f %m "$lock_file.d" 2>/dev/null || stat -c %Y "$lock_file.d" 2>/dev/null || echo 0) ))
+        # macOS / fallback: mkdir-based lock with stale detection
+        local lock_dir="${lock_file}.d"
+        if ! mkdir "$lock_dir" 2>/dev/null; then
+            if [ -d "$lock_dir" ]; then
+                # Check if lock is stale (older than 60 seconds)
+                local lock_mtime
+                lock_mtime=$(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null || echo 0)
+                local now
+                now=$(date +%s)
+                local lock_age=$(( now - lock_mtime ))
                 if [ "$lock_age" -gt 60 ]; then
-                    rm -rf "$lock_file.d"
-                    mkdir "$lock_file.d" 2>/dev/null || return 1
+                    rm -rf "$lock_dir"
+                    mkdir "$lock_dir" 2>/dev/null || return 1
                 else
                     return 1
                 fi
+            else
+                return 1
             fi
         fi
-        trap "rm -rf '$lock_file.d'" EXIT
+        # Clean up lock on exit
+        trap "rm -rf '$lock_dir'" EXIT INT TERM
     fi
 }

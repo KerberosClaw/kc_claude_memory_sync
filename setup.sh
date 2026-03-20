@@ -123,9 +123,12 @@ install_hook() {
     cp "$SCRIPT_DIR/hooks/memory-sync.sh" "$hook_script"
     chmod +x "$hook_script"
 
-    # Copy sync.sh into the local repo so the hook can find it
+    # Copy sync runtime files into the memory repo so the hook can find them
+    # These dot-files live alongside the memory .md files
     cp "$SCRIPT_DIR/sync.sh" "$LOCAL_REPO/.sync.sh"
     chmod +x "$LOCAL_REPO/.sync.sh"
+    cp "$SCRIPT_DIR/lib/common.sh" "$LOCAL_REPO/.common.sh"
+    cp "$CONFIG_YAML" "$LOCAL_REPO/.config.yaml"
 
     if [ -f "$settings_file" ]; then
         if grep -q "memory-sync" "$settings_file" 2>/dev/null; then
@@ -187,9 +190,9 @@ cmd_init_hub() {
     load_config "$CONFIG_YAML"
 
     # Step 1: Create bare repo (locally — this IS the hub)
-    info "Creating bare repo at $HUB_BARE_REPO..."
-    local bare_path
-    bare_path=$(eval echo "$HUB_BARE_REPO")
+    # HUB_BARE_REPO is already ~ expanded by load_config
+    local bare_path="$HUB_BARE_REPO"
+    info "Creating bare repo at $bare_path..."
     if [ -d "$bare_path" ]; then
         ok "Bare repo already exists"
     else
@@ -210,14 +213,26 @@ cmd_init_hub() {
         ok "Local repo initialized"
     fi
 
-    # Step 3: Copy existing memory files into repo
+    # Ensure memory repo ignores sync runtime files
+    if [ ! -f "$LOCAL_REPO/.gitignore" ]; then
+        cat > "$LOCAL_REPO/.gitignore" <<'GITIGNORE'
+.sync.sh
+.sync.lock
+.sync.lock.d
+.common.sh
+.config.yaml
+.DS_Store
+GITIGNORE
+    fi
+
+    # Step 3: Copy existing memory files into repo and rebuild index
     if [ -d "$LOCAL_MEMORY_DIR" ] && [ ! -L "$LOCAL_MEMORY_DIR" ]; then
         info "Copying existing memory files..."
         cp -n "$LOCAL_MEMORY_DIR"/*.md "$LOCAL_REPO/" 2>/dev/null || true
+        "$SCRIPT_DIR/lib/merge-memory.sh" "$LOCAL_MEMORY_DIR" "$LOCAL_REPO"
+    else
+        info "No existing memory directory found — starting fresh"
     fi
-
-    # Step 4: Rebuild MEMORY.md index
-    "$SCRIPT_DIR/lib/merge-memory.sh" "$LOCAL_MEMORY_DIR" "$LOCAL_REPO" 2>/dev/null || true
 
     # Step 5: Initial commit + push
     cd "$LOCAL_REPO"
@@ -228,8 +243,6 @@ cmd_init_hub() {
         git push -u origin main
         ok "Initial commit pushed"
     else
-        # Ensure main branch exists
-        git branch -M main 2>/dev/null || true
         ok "No new files to commit"
     fi
 
@@ -269,10 +282,10 @@ cmd_join() {
 
     # Step 2: Verify bare repo exists on hub
     info "Checking bare repo on hub..."
-    if $SSH_CMD "$REMOTE" "[ -d $(eval echo "$HUB_BARE_REPO") ]" 2>/dev/null; then
+    if $SSH_CMD "$REMOTE" "[ -d $HUB_BARE_REPO_RAW ]" 2>/dev/null; then
         ok "Bare repo found on hub"
     else
-        error "Bare repo not found at $REMOTE:$HUB_BARE_REPO
+        error "Bare repo not found at $REMOTE:$HUB_BARE_REPO_RAW
   Run './setup.sh init-hub' on the hub machine first."
     fi
 
@@ -283,7 +296,7 @@ cmd_join() {
         cd "$LOCAL_REPO"
         git pull origin main 2>/dev/null || true
     else
-        git clone "$REMOTE:$(eval echo "$HUB_BARE_REPO")" "$LOCAL_REPO"
+        git clone "$REMOTE:$HUB_BARE_REPO_RAW" "$LOCAL_REPO"
         cd "$LOCAL_REPO"
         ok "Cloned from hub"
     fi
@@ -312,7 +325,7 @@ cmd_join() {
     echo ""
     echo -e "${GREEN}=== Join Complete ===${NC}"
     echo ""
-    echo "Hub:        $REMOTE:$HUB_BARE_REPO"
+    echo "Hub:        $REMOTE:$HUB_BARE_REPO_RAW"
     echo "Local repo: $LOCAL_REPO"
     echo "Memory dir: $LOCAL_MEMORY_DIR -> $LOCAL_REPO"
     echo ""

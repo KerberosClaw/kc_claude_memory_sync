@@ -5,14 +5,19 @@
 #   ./sync.sh push     Commit + push to hub
 #   ./sync.sh sync     Pull then push (default)
 #   ./sync.sh status   Show sync status
+#
+# This script is also copied as .sync.sh into the memory repo for hook use.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Source common lib — search multiple locations
+# When running as .sync.sh inside memory repo, .common.sh is copied alongside it.
+# When running from the project dir, lib/common.sh is available.
 LIB_FILE=""
-for candidate in "$SCRIPT_DIR/lib/common.sh" "$SCRIPT_DIR/../lib/common.sh" \
+for candidate in "$SCRIPT_DIR/lib/common.sh" \
+                 "$SCRIPT_DIR/.common.sh" \
                  "$HOME/dev/kc_claude_memory_sync/lib/common.sh"; do
     if [ -f "$candidate" ]; then
         LIB_FILE="$candidate"
@@ -89,27 +94,31 @@ do_status() {
         echo -e "Local changes: ${GREEN}none${NC}"
     fi
 
-    # Ahead/behind remote
-    local ahead behind
-    ahead=$(git rev-list origin/main..HEAD 2>/dev/null | wc -l | tr -d ' ')
-    behind=$(git rev-list HEAD..origin/main 2>/dev/null | wc -l | tr -d ' ')
+    # Ahead/behind remote (only if origin/main exists)
+    if git rev-parse --verify origin/main >/dev/null 2>&1; then
+        local ahead behind
+        ahead=$(git rev-list origin/main..HEAD 2>/dev/null | wc -l | tr -d ' ')
+        behind=$(git rev-list HEAD..origin/main 2>/dev/null | wc -l | tr -d ' ')
 
-    if [ "$ahead" -gt 0 ]; then
-        echo -e "Outgoing:      ${YELLOW}${ahead} commit(s) not pushed${NC}"
-    fi
-    if [ "$behind" -gt 0 ]; then
-        echo -e "Incoming:      ${YELLOW}${behind} commit(s) not pulled${NC}"
-    fi
-    if [ "$ahead" -eq 0 ] && [ "$behind" -eq 0 ]; then
-        echo -e "Sync state:    ${GREEN}up to date${NC}"
+        if [ "$ahead" -gt 0 ]; then
+            echo -e "Outgoing:      ${YELLOW}${ahead} commit(s) not pushed${NC}"
+        fi
+        if [ "$behind" -gt 0 ]; then
+            echo -e "Incoming:      ${YELLOW}${behind} commit(s) not pulled${NC}"
+        fi
+        if [ "$ahead" -eq 0 ] && [ "$behind" -eq 0 ]; then
+            echo -e "Sync state:    ${GREEN}up to date${NC}"
+        fi
+    else
+        echo -e "Sync state:    ${YELLOW}no remote tracking yet${NC}"
     fi
 
     # Conflict files
     local conflicts
-    conflicts=$(ls "$LOCAL_REPO"/*_conflict.md 2>/dev/null | wc -l | tr -d ' ')
+    conflicts=$(find "$LOCAL_REPO" -maxdepth 1 -name "*_conflict.md" 2>/dev/null | wc -l | tr -d ' ')
     if [ "$conflicts" -gt 0 ]; then
         echo -e "Conflicts:     ${RED}${conflicts} file(s) need review${NC}"
-        ls "$LOCAL_REPO"/*_conflict.md 2>/dev/null | sed 's/^/               /'
+        find "$LOCAL_REPO" -maxdepth 1 -name "*_conflict.md" 2>/dev/null | sed 's/^/               /'
     fi
 
     echo ""
