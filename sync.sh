@@ -52,6 +52,10 @@ do_push() {
     git add -A
 
     if git diff --cached --quiet 2>/dev/null; then
+        # Nothing new to commit, but push any unpushed commits
+        if hub_reachable; then
+            _pull_and_push
+        fi
         return 0
     fi
 
@@ -59,8 +63,41 @@ do_push() {
         --no-gpg-sign 2>/dev/null || true
 
     if hub_reachable; then
-        git push origin main 2>/dev/null || true
+        _pull_and_push
     fi
+}
+
+# Pull from hub then push, with automatic conflict resolution.
+# Strategy: try rebase (clean history) → if conflict, abort and merge -X ours
+# (keep local edits for conflicting lines, merge non-conflicting remote changes).
+_pull_and_push() {
+    git fetch origin main 2>/dev/null || return 0
+
+    # Check if we're behind
+    if [ "$(git rev-list HEAD..origin/main 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ]; then
+        # Not behind, just push
+        git push origin main 2>/dev/null || true
+        return 0
+    fi
+
+    # Try 1: rebase (cleanest history)
+    if git pull --rebase origin main 2>/dev/null; then
+        git push origin main 2>/dev/null || true
+        return 0
+    fi
+
+    # Rebase failed (conflict) — abort it
+    git rebase --abort 2>/dev/null || true
+
+    # Try 2: merge with -X ours (auto-resolve conflicts, keep local version)
+    if git pull -X ours --no-edit origin main 2>/dev/null; then
+        git push origin main 2>/dev/null || true
+        return 0
+    fi
+
+    # Merge also failed (shouldn't happen with -X ours, but just in case)
+    git merge --abort 2>/dev/null || true
+    warn "Could not auto-resolve conflicts — push deferred to next sync"
 }
 
 do_status() {
