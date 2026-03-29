@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Shell](https://img.shields.io/badge/Shell-Bash-green.svg)](https://www.gnu.org/software/bash/)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-Hook_Compatible-blueviolet.svg)](https://claude.com/claude-code)
+[![Tests](https://github.com/KerberosClaw/kc_claude_memory_sync/actions/workflows/test.yml/badge.svg)](https://github.com/KerberosClaw/kc_claude_memory_sync/actions/workflows/test.yml)
 
 [English](README.md)
 
@@ -147,7 +148,8 @@ Sync state:    up to date
 
 ```yaml
 hub:
-  host: 192.168.1.100
+  host: my-server.tailnet.ts.net   # 主要 host（如 Tailscale hostname）
+  fallback_host: 192.168.1.100     # 主要 host 連不上時的備援（如區網 IP，選填）
   user: username
   bare_repo: ~/git/claude-memory.git
 
@@ -163,6 +165,7 @@ sync:
 | 欄位 | 說明 | 預設值 |
 |------|------|--------|
 | `hub.host` | Hub 的 SSH host/IP | -- |
+| `hub.fallback_host` | 主要 host 連不上時的備援（如區網 IP） | -- |
 | `hub.user` | Hub 的 SSH 使用者名稱 | -- |
 | `hub.bare_repo` | Hub 上 bare repo 路徑 | `~/git/claude-memory.git` |
 | `ssh.key` | SSH 私鑰路徑 | `~/.ssh/id_ed25519` |
@@ -182,6 +185,7 @@ kc_claude_memory_sync/
 ├── lib/
 │   ├── common.sh         # 共用函式（YAML 解析、lock、SSH）
 │   └── merge-memory.sh   # 記憶檔合併 + MEMORY.md 去重
+├── specs/                # Spec-driven 開發文件
 ├── config.example.yaml   # 設定範例
 ├── CLAUDE.md             # Claude Code 自動化指引
 ├── LICENSE
@@ -202,7 +206,7 @@ cd ~/dev/kc_claude_memory_sync
 
 我們相信坦誠相見，所以這個工具「不能」做的事：
 
-- **僅限區網同步**——需要 SSH 連到 Hub。沒網路、沒 VPN、就沒同步。變更會暫存在本地，下次連上時自動 push。這不是 bug，是隱私功能。（好吧，是限制。）
+- **需要 SSH 連到 Hub**——透過主要 host 或備援。兩條路都不通時，變更暫存在本地，下次連上時自動 push。設 `hub.fallback_host` 為區網 IP，就能在遠端（Tailscale/VPN）和本地（區網）都能同步。
 - **對話開始時不會自動 pull**——Claude Code 沒有 session-start hook，所以我們沒辦法在你開新對話時神奇地 pull。開工前跑一下 `sync.sh pull`，或直接用 `sync.sh sync` 讓它先 pull 再 push。
 - **單一 Hub**——一個 bare repo server，所有 Spoke 連過去。Hub 掛了，同步暫停。不過你本機的記憶完全不受影響。
 

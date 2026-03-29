@@ -4,6 +4,9 @@
 
 hub:
   host: 192.168.1.100         # IP or hostname of the bare repo server
+  fallback_host:               # (optional) LAN IP to try when primary host is unreachable
+                               # e.g. if host is a Tailscale hostname, set fallback_host to the LAN IP
+                               # so sync works both remotely (Tailscale) and locally (LAN)
   user: username               # SSH username on the hub machine
   bare_repo: ~/git/claude-memory.git  # Path to bare repo on hub
 

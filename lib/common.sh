@@ -84,6 +84,7 @@ load_config() {
     fi
 
     HUB_HOST=$(parse_yaml "$CONFIG_FILE" "hub.host")
+    HUB_FALLBACK_HOST=$(parse_yaml "$CONFIG_FILE" "hub.fallback_host")
     HUB_USER=$(parse_yaml "$CONFIG_FILE" "hub.user")
     HUB_BARE_REPO=$(parse_yaml "$CONFIG_FILE" "hub.bare_repo")
     SSH_KEY=$(parse_yaml "$CONFIG_FILE" "ssh.key")
@@ -111,7 +112,9 @@ load_config() {
 
 # Check if hub is reachable
 # If git remote is a local path (hub machine), always reachable.
-# If git remote is SSH, check via SSH connection.
+# If git remote is SSH, try primary host first, then fallback_host (LAN IP).
+# When fallback succeeds, temporarily switches git remote for this sync only,
+# then restores the original remote URL afterward.
 hub_reachable() {
     local remote_url
     remote_url=$(git -C "$LOCAL_REPO" remote get-url origin 2>/dev/null || true)
@@ -119,8 +122,29 @@ hub_reachable() {
     if [[ "$remote_url" == /* ]] || [[ "$remote_url" == ~* ]]; then
         return 0
     fi
-    # SSH remote → check connection
-    $SSH_CMD "$REMOTE" "true" 2>/dev/null
+    # SSH remote → try primary host
+    if $SSH_CMD "$REMOTE" "true" 2>/dev/null; then
+        # Ensure remote URL points to primary (restore if previously changed)
+        local primary_url="${REMOTE}:${HUB_BARE_REPO_RAW}"
+        if [[ "$remote_url" != "$primary_url" ]]; then
+            git -C "$LOCAL_REPO" remote set-url origin "$primary_url" 2>/dev/null
+        fi
+        return 0
+    fi
+    # Primary failed → try fallback host (LAN IP)
+    if [ -n "$HUB_FALLBACK_HOST" ]; then
+        local fallback_remote="$HUB_USER@$HUB_FALLBACK_HOST"
+        if $SSH_CMD "$fallback_remote" "true" 2>/dev/null; then
+            # Temporarily switch to fallback
+            REMOTE="$fallback_remote"
+            _ORIGINAL_REMOTE_URL="$remote_url"
+            git -C "$LOCAL_REPO" remote set-url origin "${fallback_remote}:${HUB_BARE_REPO_RAW}" 2>/dev/null
+            # Restore original remote URL on exit
+            trap '_restore_remote' EXIT
+            return 0
+        fi
+    fi
+    return 1
 }
 
 # Acquire a lock to prevent concurrent git operations
@@ -154,6 +178,13 @@ acquire_lock() {
             fi
         fi
         # Clean up lock on exit
-        trap "rm -rf '$lock_dir'" EXIT INT TERM
+        trap 'rm -rf "'"$lock_dir"'"; _restore_remote' EXIT INT TERM
+    fi
+}
+
+# Restore git remote URL to primary host after fallback
+_restore_remote() {
+    if [ -n "${_ORIGINAL_REMOTE_URL:-}" ]; then
+        git -C "$LOCAL_REPO" remote set-url origin "$_ORIGINAL_REMOTE_URL" 2>/dev/null || true
     fi
 }

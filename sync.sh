@@ -30,6 +30,7 @@ if [ -z "$LIB_FILE" ]; then
     exit 1
 fi
 
+# shellcheck source=lib/common.sh
 source "$LIB_FILE"
 load_config
 

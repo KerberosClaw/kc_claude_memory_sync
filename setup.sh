@@ -100,7 +100,8 @@ setup_symlink() {
     if [ -L "$LOCAL_MEMORY_DIR" ]; then
         ok "Symlink already exists: $LOCAL_MEMORY_DIR -> $(readlink "$LOCAL_MEMORY_DIR")"
     elif [ -d "$LOCAL_MEMORY_DIR" ]; then
-        local backup="${LOCAL_MEMORY_DIR}.bak.$(date +%Y%m%d%H%M%S)"
+        local backup
+        backup="${LOCAL_MEMORY_DIR}.bak.$(date +%Y%m%d%H%M%S)"
         info "Backing up original memory dir to $backup"
         mv "$LOCAL_MEMORY_DIR" "$backup"
         ln -s "$LOCAL_REPO" "$LOCAL_MEMORY_DIR"

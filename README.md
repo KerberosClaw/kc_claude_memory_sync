@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Shell](https://img.shields.io/badge/Shell-Bash-green.svg)](https://www.gnu.org/software/bash/)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-Hook_Compatible-blueviolet.svg)](https://claude.com/claude-code)
+[![Tests](https://github.com/KerberosClaw/kc_claude_memory_sync/actions/workflows/test.yml/badge.svg)](https://github.com/KerberosClaw/kc_claude_memory_sync/actions/workflows/test.yml)
 
 [正體中文](README_zh.md)
 
@@ -147,7 +148,8 @@ No more wondering "did my laptop push before I closed the lid?" -- just run stat
 
 ```yaml
 hub:
-  host: 192.168.1.100
+  host: my-server.tailnet.ts.net   # Primary (e.g. Tailscale hostname)
+  fallback_host: 192.168.1.100     # LAN IP when Tailscale is down (optional)
   user: username
   bare_repo: ~/git/claude-memory.git
 
@@ -163,6 +165,7 @@ sync:
 | Field | Description | Default |
 |-------|-------------|---------|
 | `hub.host` | Hub SSH host/IP | -- |
+| `hub.fallback_host` | Fallback host when primary is unreachable (e.g. LAN IP) | -- |
 | `hub.user` | Hub SSH username | -- |
 | `hub.bare_repo` | Bare repo path on hub | `~/git/claude-memory.git` |
 | `ssh.key` | SSH private key | `~/.ssh/id_ed25519` |
@@ -182,6 +185,7 @@ kc_claude_memory_sync/
 ├── lib/
 │   ├── common.sh         # Shared functions (YAML parsing, locking, SSH)
 │   └── merge-memory.sh   # Memory file merge + MEMORY.md dedup
+├── specs/                # Spec-driven development artifacts
 ├── config.example.yaml   # Example configuration
 ├── CLAUDE.md             # Claude Code automation instructions
 ├── LICENSE
@@ -202,7 +206,7 @@ Restores your original memory directory, removes the hook script and its setting
 
 We believe in setting expectations, so here's what this tool *doesn't* do:
 
-- **LAN-only sync** -- needs SSH access to the hub. No internet, no VPN, no sync. Changes queue up locally and push next time you're on the network. It's not a bug, it's a privacy feature. (Okay, it's a limitation.)
+- **Needs SSH to the hub** -- either via primary host or fallback. If both are unreachable, changes queue up locally and push next time you connect. Set `hub.fallback_host` to a LAN IP so sync works both remotely (Tailscale/VPN) and locally (LAN).
 - **No auto-pull on session start** -- Claude Code doesn't have a session-start hook, so we can't magically pull when you open a new conversation. Run `sync.sh pull` before starting work, or just let the next `push` pull first via `sync.sh sync`.
 - **Single hub** -- one bare repo server, all spokes connect to it. If your hub goes down, syncing pauses. Your local memories are fine though.
 
