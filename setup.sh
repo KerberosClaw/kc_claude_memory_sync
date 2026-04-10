@@ -127,7 +127,8 @@ with open(settings_path, 'w') as f:
 # Migrate existing memory files from Claude Code default location
 migrate_existing_memory() {
     local target_repo="$1"
-    local default_memory_dir="$HOME/.claude/projects/-Users-$(whoami)/memory"
+    local default_memory_dir
+    default_memory_dir="$HOME/.claude/projects/-Users-$(whoami)/memory"
 
     if [ -d "$default_memory_dir" ] && [ ! -L "$default_memory_dir" ]; then
         info "Found existing memory files in $default_memory_dir"
