@@ -1,44 +1,46 @@
 #!/bin/bash
-# Claude Code PostToolUse hook — auto-sync memory after Write/Edit
+# Claude Code PostToolUse hook — auto push memory to GitHub
 #
-# Triggered when Claude writes or edits a file.
-# Only syncs if the file is inside the memory directory.
-# This script must ALWAYS exit 0 to avoid blocking Claude Code.
+# Triggered on Write/Edit. Only acts if the file is inside the memory repo.
+# Must ALWAYS exit 0 to avoid blocking Claude Code.
 
-# Do NOT use set -e here — hook must never fail
-
-# Ensure jq is available
 command -v jq >/dev/null 2>&1 || exit 0
+command -v git >/dev/null 2>&1 || exit 0
 
-# Read hook input from stdin
 INPUT=$(cat)
-
-# Extract file path from tool input
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null || true)
+[ -z "$FILE_PATH" ] && exit 0
 
-if [ -z "$FILE_PATH" ]; then
-    exit 0
-fi
-
-# Resolve symlinks to get the real path
 REAL_PATH=$(realpath "$FILE_PATH" 2>/dev/null || echo "$FILE_PATH")
 
-# Find the memory repo directory (resolve the symlink)
-MEMORY_LINK="$HOME/.claude/projects/-Users-$(whoami)/memory"
-if [ -L "$MEMORY_LINK" ]; then
-    MEMORY_REPO=$(realpath "$MEMORY_LINK" 2>/dev/null || readlink "$MEMORY_LINK")
-else
-    exit 0
+# Read memory repo path from Claude Code settings
+MEMORY_REPO=""
+SETTINGS="$HOME/.claude/settings.json"
+if [ -f "$SETTINGS" ]; then
+    MEMORY_REPO=$(jq -r '.autoMemoryDirectory // empty' "$SETTINGS" 2>/dev/null || true)
+    MEMORY_REPO="${MEMORY_REPO/#\~/$HOME}"
 fi
+[ -z "$MEMORY_REPO" ] && exit 0
+[ -d "$MEMORY_REPO/.git" ] || exit 0
 
-# Check if the written file is inside the memory repo
 case "$REAL_PATH" in
     "$MEMORY_REPO"*)
-        # File is in memory repo — trigger sync in background
-        SYNC_SCRIPT="$MEMORY_REPO/.sync.sh"
-        if [ -x "$SYNC_SCRIPT" ]; then
-            "$SYNC_SCRIPT" push >/dev/null 2>&1 &
+        cd "$MEMORY_REPO" || exit 0
+        # Lock to prevent concurrent pushes
+        LOCK="$MEMORY_REPO/.git/sync.lock"
+        if ! mkdir "$LOCK" 2>/dev/null; then
+            exit 0
         fi
+        trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+
+        git add -A >/dev/null 2>&1
+        git diff --cached --quiet && exit 0
+        git commit -m "sync: update memory" >/dev/null 2>&1
+
+        # pull before push, last write wins on conflict
+        git pull --rebase -X theirs --quiet >/dev/null 2>&1 \
+            || git rebase --abort >/dev/null 2>&1
+        git push >/dev/null 2>&1 &
         ;;
 esac
 

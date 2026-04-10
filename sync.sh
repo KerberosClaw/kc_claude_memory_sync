@@ -1,23 +1,18 @@
 #!/bin/bash
 # Claude Memory Sync — manual sync and status
 # Usage:
-#   ./sync.sh pull     Pull from hub
-#   ./sync.sh push     Commit + push to hub
+#   ./sync.sh pull     Pull from GitHub
+#   ./sync.sh push     Commit + push to GitHub
 #   ./sync.sh sync     Pull then push (default)
 #   ./sync.sh status   Show sync status
-#
-# This script is also copied as .sync.sh into the memory repo for hook use.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Source common lib — search multiple locations
-# When running as .sync.sh inside memory repo, .common.sh is copied alongside it.
-# When running from the project dir, lib/common.sh is available.
+# Source common lib
 LIB_FILE=""
 for candidate in "$SCRIPT_DIR/lib/common.sh" \
-                 "$SCRIPT_DIR/.common.sh" \
                  "$HOME/dev/kc_claude_memory_sync/lib/common.sh"; do
     if [ -f "$candidate" ]; then
         LIB_FILE="$candidate"
@@ -39,80 +34,70 @@ ACTION="${1:-sync}"
 cd "$LOCAL_REPO"
 
 do_pull() {
-    if hub_reachable; then
-        git fetch origin main 2>/dev/null || true
-        git pull --rebase origin main 2>/dev/null || git pull origin main 2>/dev/null || true
-    else
-        warn "Hub unreachable — skipping pull"
-    fi
+    info "Pulling from GitHub..."
+    git fetch origin main 2>/dev/null || { warn "Fetch failed -- are you online?"; return 0; }
+    git pull --rebase -X theirs origin main 2>/dev/null \
+        || git rebase --abort 2>/dev/null \
+        || git pull origin main 2>/dev/null \
+        || true
+    ok "Pull complete"
 }
 
 do_push() {
-    acquire_lock || { warn "Another sync in progress — skipping"; return 0; }
+    acquire_lock || { warn "Another sync in progress -- skipping"; return 0; }
 
     git add -A
 
     if git diff --cached --quiet 2>/dev/null; then
         # Nothing new to commit, but push any unpushed commits
-        if hub_reachable; then
-            _pull_and_push
-        fi
+        _pull_and_push
         return 0
     fi
 
     git commit -m "memory sync $(date '+%Y-%m-%d %H:%M:%S') from $(hostname)" \
-        --no-gpg-sign 2>/dev/null || true
+        2>/dev/null || true
 
-    if hub_reachable; then
-        _pull_and_push
-    fi
+    _pull_and_push
 }
 
-# Pull from hub then push, with automatic conflict resolution.
-# Strategy: try rebase (clean history) → if conflict, abort and merge -X ours
-# (keep local edits for conflicting lines, merge non-conflicting remote changes).
+# Pull then push, with automatic conflict resolution.
+# Strategy: try rebase (clean history) -> if conflict, abort and use theirs
 _pull_and_push() {
     git fetch origin main 2>/dev/null || return 0
 
     # Check if we're behind
-    if [ "$(git rev-list HEAD..origin/main 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ]; then
-        # Not behind, just push
-        git push origin main 2>/dev/null || true
-        return 0
+    if git rev-parse --verify origin/main >/dev/null 2>&1; then
+        local behind
+        behind=$(git rev-list HEAD..origin/main 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$behind" -gt 0 ]; then
+            info "Pulling $behind commit(s)..."
+            if ! git pull --rebase -X theirs origin main 2>/dev/null; then
+                git rebase --abort 2>/dev/null || true
+                git pull -X ours --no-edit origin main 2>/dev/null || {
+                    git merge --abort 2>/dev/null || true
+                    warn "Could not auto-resolve conflicts -- push deferred"
+                    return 0
+                }
+            fi
+        fi
     fi
 
-    # Try 1: rebase (cleanest history)
-    if git pull --rebase origin main 2>/dev/null; then
-        git push origin main 2>/dev/null || true
-        return 0
-    fi
-
-    # Rebase failed (conflict) — abort it
-    git rebase --abort 2>/dev/null || true
-
-    # Try 2: merge with -X ours (auto-resolve conflicts, keep local version)
-    if git pull -X ours --no-edit origin main 2>/dev/null; then
-        git push origin main 2>/dev/null || true
-        return 0
-    fi
-
-    # Merge also failed (shouldn't happen with -X ours, but just in case)
-    git merge --abort 2>/dev/null || true
-    warn "Could not auto-resolve conflicts — push deferred to next sync"
+    info "Pushing to GitHub..."
+    git push origin main 2>/dev/null && ok "Push complete" \
+        || warn "Push failed -- will retry next sync"
 }
 
 do_status() {
     echo -e "${CYAN}=== Claude Memory Sync Status ===${NC}"
     echo ""
 
-    # Hub reachability
-    printf "Hub:           %s — " "$REMOTE"
-    if hub_reachable; then
-        echo -e "${GREEN}reachable${NC}"
-        git fetch origin main 2>/dev/null || true
-    else
-        echo -e "${RED}unreachable${NC}"
-    fi
+    # Remote URL
+    local remote_url
+    remote_url=$(git remote get-url origin 2>/dev/null || echo "not configured")
+    echo "Remote:        $remote_url"
+
+    # Fetch to get latest state
+    git fetch origin main 2>/dev/null || true
 
     # Last sync time (last commit)
     local last_commit

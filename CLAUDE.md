@@ -4,41 +4,46 @@ This file helps Claude Code automatically set up memory sync for the user.
 
 ## When the user asks to set up memory sync
 
-1. Check if `config.yaml` exists in this project directory.
-2. If not, ask the user for:
-   - Hub machine SSH host (IP or hostname)
-   - Hub machine SSH username
-   - (Optional) Bare repo path, SSH key path, local repo path — use defaults if not specified
-3. Write `config.yaml` using the format in `config.example.yaml`.
-4. Determine which setup mode to use:
-   - If this machine IS the hub (the user says so, or the host matches this machine): run `./setup.sh init-hub`
-   - If this machine is a spoke (connecting to an existing hub): run `./setup.sh join`
-5. Both commands support non-interactive mode via CLI args:
+1. Check if `config.sh` exists in this project directory.
+2. If not, determine which setup mode to use:
+   - **First machine** (no existing repo): run `./setup.sh init`
+   - **Additional machine** (joining existing repo): run `./setup.sh join`
+3. Both commands support non-interactive mode via CLI args:
    ```bash
-   ./setup.sh init-hub --hub-host HOST --hub-user USER
-   ./setup.sh join --hub-host HOST --hub-user USER
+   ./setup.sh init --repo-name kc_claude_memory --local-repo ~/dev/kc_claude_memory
+   ./setup.sh join --repo-url https://github.com/user/repo.git --key-file /tmp/key --local-repo ~/dev/kc_claude_memory
    ```
 
 ## Prerequisites to verify
 
 Before running setup, verify:
+- `git` is installed
+- `git-crypt` is installed: `which git-crypt`
 - `jq` is installed: `which jq`
-- SSH key exists: `ls ~/.ssh/id_ed25519`
-- Passwordless SSH works: `ssh -o BatchMode=yes USER@HOST true`
+- `gh` (GitHub CLI) is installed and authenticated: `gh auth status`
 
-If passwordless SSH is not set up, guide the user:
-```bash
-ssh-copy-id -i ~/.ssh/id_ed25519.pub USER@HOST
-```
+## How it works
+
+- `init` creates a GitHub private repo, initializes git-crypt, exports the encryption key, and pushes
+- `join` clones the repo and unlocks it with a git-crypt key file
+- Both configure `autoMemoryDirectory` in `~/.claude/settings.json` so Claude Code reads/writes memory from the synced repo
+- A PostToolUse hook auto-commits and pushes on every Write/Edit to memory files
 
 ## After setup
 
-- Verify the symlink: `ls -la ~/.claude/projects/-Users-$(whoami)/memory`
-- Check sync status: `~/dev/claude-memory/.sync.sh status`
+- Verify settings: `jq '.autoMemoryDirectory' ~/.claude/settings.json`
+- Check sync status: `./sync.sh status`
 - Test the hook by writing a memory file and checking if it auto-commits
+
+## Key management
+
+- The git-crypt key is at `<local-repo>/.git/git-crypt-key` after init
+- Transfer it securely to other machines (scp, USB, AirDrop)
+- Lose the key = lose access to encrypted memory on GitHub
+- Delete key copies from transfer locations after setup
 
 ## Troubleshooting
 
-- If push fails silently, check `~/dev/claude-memory/.sync.sh status`
+- If push fails silently, check `./sync.sh status`
 - If hook doesn't trigger, verify `~/.claude/settings.json` has the PostToolUse hook
-- If memory dir path is wrong, check `sync.memory_dir` in config.yaml
+- If files look encrypted, run `git-crypt unlock <key-file>` in the repo

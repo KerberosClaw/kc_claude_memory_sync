@@ -1,46 +1,44 @@
 #!/bin/bash
 # Claude Memory Sync — setup script
 # Usage:
-#   ./setup.sh init-hub              # Run on the hub machine (creates bare repo)
-#   ./setup.sh join                  # Run on spoke machines (clone + symlink + hook)
-#   ./setup.sh init-hub --help       # Show help
+#   ./setup.sh init              # First machine: create GitHub repo + git-crypt + push
+#   ./setup.sh join              # Additional machines: clone + unlock + merge
 #
-# Non-interactive mode (for Claude Code automation):
-#   ./setup.sh init-hub --hub-host HOST --hub-user USER [options]
-#   ./setup.sh join --hub-host HOST --hub-user USER [options]
+# Non-interactive mode:
+#   ./setup.sh init --repo-name kc_claude_memory --local-repo ~/dev/kc_claude_memory
+#   ./setup.sh join --repo-url https://github.com/user/repo.git --key-file /tmp/key --local-repo ~/dev/kc_claude_memory
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 
-CONFIG_YAML="$SCRIPT_DIR/config.yaml"
-
 usage() {
     echo "Usage: $0 <command> [options]"
     echo ""
     echo "Commands:"
-    echo "  init-hub    Initialize this machine as the hub (bare repo + local setup)"
-    echo "  join        Join this machine as a spoke (clone from hub + setup)"
+    echo "  init    First machine: create GitHub private repo, git-crypt, push"
+    echo "  join    Additional machines: clone, unlock, merge local memory"
     echo ""
-    echo "Options (non-interactive mode):"
-    echo "  --hub-host HOST        Hub SSH host/IP"
-    echo "  --hub-user USER        Hub SSH username"
-    echo "  --bare-repo PATH       Bare repo path on hub (default: ~/git/claude-memory.git)"
-    echo "  --ssh-key PATH         SSH key path (default: ~/.ssh/id_ed25519)"
-    echo "  --local-repo PATH      Local repo path (default: ~/dev/claude-memory)"
+    echo "Options for init:"
+    echo "  --repo-name NAME      GitHub repo name (default: kc_claude_memory)"
+    echo "  --local-repo PATH     Local clone path (default: ~/dev/kc_claude_memory)"
+    echo ""
+    echo "Options for join:"
+    echo "  --repo-url URL        GitHub repo URL (HTTPS or SSH)"
+    echo "  --key-file PATH       Path to git-crypt key file"
+    echo "  --local-repo PATH     Local clone path (default: ~/dev/kc_claude_memory)"
     exit 1
 }
 
-# Parse CLI arguments into variables (for non-interactive mode)
+# Parse CLI arguments
 parse_args() {
-    ARG_HUB_HOST="" ARG_HUB_USER="" ARG_BARE_REPO="" ARG_SSH_KEY="" ARG_LOCAL_REPO=""
+    ARG_REPO_NAME="" ARG_REPO_URL="" ARG_KEY_FILE="" ARG_LOCAL_REPO=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            --hub-host)   ARG_HUB_HOST="$2"; shift 2 ;;
-            --hub-user)   ARG_HUB_USER="$2"; shift 2 ;;
-            --bare-repo)  ARG_BARE_REPO="$2"; shift 2 ;;
-            --ssh-key)    ARG_SSH_KEY="$2"; shift 2 ;;
+            --repo-name)  ARG_REPO_NAME="$2"; shift 2 ;;
+            --repo-url)   ARG_REPO_URL="$2"; shift 2 ;;
+            --key-file)   ARG_KEY_FILE="$2"; shift 2 ;;
             --local-repo) ARG_LOCAL_REPO="$2"; shift 2 ;;
             --help|-h)    usage ;;
             *)            shift ;;
@@ -48,195 +46,197 @@ parse_args() {
     done
 }
 
-# Generate config.yaml — interactive or from CLI args
-generate_config() {
-    if [ -f "$CONFIG_YAML" ]; then
-        info "config.yaml already exists, loading..."
-        return
+# Check that required tools are installed
+check_prereqs() {
+    local missing=()
+    command -v git >/dev/null 2>&1        || missing+=("git")
+    command -v jq >/dev/null 2>&1         || missing+=("jq")
+    command -v gh >/dev/null 2>&1         || missing+=("gh (GitHub CLI)")
+    command -v python3 >/dev/null 2>&1    || missing+=("python3")
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        error "Missing prerequisites: ${missing[*]}
+  Install them and try again."
     fi
 
-    local hub_host hub_user bare_repo ssh_key local_repo
-
-    if [ -n "$ARG_HUB_HOST" ] && [ -n "$ARG_HUB_USER" ]; then
-        # Non-interactive mode
-        hub_host="$ARG_HUB_HOST"
-        hub_user="$ARG_HUB_USER"
-        bare_repo="${ARG_BARE_REPO:-~/git/claude-memory.git}"
-        ssh_key="${ARG_SSH_KEY:-~/.ssh/id_ed25519}"
-        local_repo="${ARG_LOCAL_REPO:-~/dev/claude-memory}"
-    else
-        # Interactive mode
-        echo -e "${CYAN}=== Claude Memory Sync Setup ===${NC}"
-        echo ""
-        read -rp "Hub SSH host (IP or hostname): " hub_host
-        read -rp "Hub SSH username: " hub_user
-        read -rp "Bare repo path on hub [~/git/claude-memory.git]: " bare_repo
-        bare_repo="${bare_repo:-~/git/claude-memory.git}"
-        read -rp "SSH key path [~/.ssh/id_ed25519]: " ssh_key
-        ssh_key="${ssh_key:-~/.ssh/id_ed25519}"
-        read -rp "Local repo directory [~/dev/claude-memory]: " local_repo
-        local_repo="${local_repo:-~/dev/claude-memory}"
-    fi
-
-    cat > "$CONFIG_YAML" <<CONF
-hub:
-  host: "$hub_host"
-  user: "$hub_user"
-  bare_repo: "$bare_repo"
-
-ssh:
-  key: "$ssh_key"
-  timeout: 3
-
-sync:
-  local_repo: "$local_repo"
-CONF
-    ok "Config saved to $CONFIG_YAML"
-    echo ""
-}
-
-# Set up symlink: memory dir → local repo
-setup_symlink() {
-    if [ -L "$LOCAL_MEMORY_DIR" ]; then
-        ok "Symlink already exists: $LOCAL_MEMORY_DIR -> $(readlink "$LOCAL_MEMORY_DIR")"
-    elif [ -d "$LOCAL_MEMORY_DIR" ]; then
-        local backup
-        backup="${LOCAL_MEMORY_DIR}.bak.$(date +%Y%m%d%H%M%S)"
-        info "Backing up original memory dir to $backup"
-        mv "$LOCAL_MEMORY_DIR" "$backup"
-        ln -s "$LOCAL_REPO" "$LOCAL_MEMORY_DIR"
-        ok "Symlink created: $LOCAL_MEMORY_DIR -> $LOCAL_REPO"
-    else
-        mkdir -p "$(dirname "$LOCAL_MEMORY_DIR")"
-        ln -s "$LOCAL_REPO" "$LOCAL_MEMORY_DIR"
-        ok "Symlink created: $LOCAL_MEMORY_DIR -> $LOCAL_REPO"
+    # Check gh auth
+    if ! gh auth status >/dev/null 2>&1; then
+        error "GitHub CLI not authenticated. Run: gh auth login"
     fi
 }
 
-# Install Claude Code PostToolUse hook
-install_hook() {
-    info "Installing Claude Code hook..."
-    local hooks_dir="$HOME/.claude/hooks"
-    local hook_script="$hooks_dir/memory-sync.sh"
+check_git_crypt() {
+    if ! command -v git-crypt >/dev/null 2>&1; then
+        error "git-crypt not installed.
+  macOS: brew install git-crypt
+  Linux: sudo apt install git-crypt"
+    fi
+}
+
+# Configure autoMemoryDirectory and PostToolUse hook in settings.json
+configure_settings() {
+    local local_repo="$1"
     local settings_file="$HOME/.claude/settings.json"
+    local hook_command="$SCRIPT_DIR/hooks/memory-sync.sh"
 
-    mkdir -p "$hooks_dir"
-    cp "$SCRIPT_DIR/hooks/memory-sync.sh" "$hook_script"
-    chmod +x "$hook_script"
+    mkdir -p "$HOME/.claude"
 
-    # Copy sync runtime files into the memory repo so the hook can find them
-    # These dot-files live alongside the memory .md files
-    cp "$SCRIPT_DIR/sync.sh" "$LOCAL_REPO/.sync.sh"
-    chmod +x "$LOCAL_REPO/.sync.sh"
-    cp "$SCRIPT_DIR/lib/common.sh" "$LOCAL_REPO/.common.sh"
-    cp "$CONFIG_YAML" "$LOCAL_REPO/.config.yaml"
+    # Create settings.json if it doesn't exist
+    if [ ! -f "$settings_file" ]; then
+        echo '{}' > "$settings_file"
+    fi
 
-    if [ -f "$settings_file" ]; then
-        if grep -q "memory-sync" "$settings_file" 2>/dev/null; then
-            ok "Hook already configured in settings.json"
-        elif grep -q '"PostToolUse"' "$settings_file" 2>/dev/null; then
-            # PostToolUse exists — append our hook to it
-            python3 -c "
-import json
-with open('$settings_file') as f:
+    info "Configuring Claude Code settings..."
+
+    python3 -c "
+import json, sys
+
+settings_path = '$settings_file'
+with open(settings_path) as f:
     settings = json.load(f)
+
+# Set autoMemoryDirectory
+settings['autoMemoryDirectory'] = '$local_repo'
+
+# Set up PostToolUse hook
 hook_entry = {
     'matcher': 'Write|Edit',
     'hooks': [{
         'type': 'command',
-        'command': '$hook_script',
-        'timeout': 15,
-        'async': True
+        'command': '$hook_command',
+        'timeout': 15
     }]
 }
-settings.setdefault('hooks', {}).setdefault('PostToolUse', []).append(hook_entry)
-with open('$settings_file', 'w') as f:
+
+post_hooks = settings.setdefault('hooks', {}).setdefault('PostToolUse', [])
+
+# Remove existing memory-sync hooks, then add ours
+post_hooks[:] = [
+    h for h in post_hooks
+    if not any('memory-sync' in hook.get('command', '') for hook in h.get('hooks', []))
+]
+post_hooks.append(hook_entry)
+
+with open(settings_path, 'w') as f:
     json.dump(settings, f, indent=2)
     f.write('\n')
-" && ok "Hook appended to existing PostToolUse in settings.json" \
-  || warn "Failed to update settings.json — add hook manually (see README)"
-        else
-            python3 -c "
-import json
-with open('$settings_file') as f:
-    settings = json.load(f)
-settings['hooks'] = {
-    'PostToolUse': [{
-        'matcher': 'Write|Edit',
-        'hooks': [{
-            'type': 'command',
-            'command': '$hook_script',
-            'timeout': 15,
-            'async': True
-        }]
-    }]
+" && ok "autoMemoryDirectory and hook configured in settings.json" \
+  || warn "Failed to update settings.json -- configure manually (see README)"
 }
-with open('$settings_file', 'w') as f:
-    json.dump(settings, f, indent=2)
-    f.write('\n')
-" && ok "Hook added to settings.json" \
-  || warn "Failed to update settings.json — add hook manually (see README)"
-        fi
+
+# Migrate existing memory files from Claude Code default location
+migrate_existing_memory() {
+    local target_repo="$1"
+    local default_memory_dir="$HOME/.claude/projects/-Users-$(whoami)/memory"
+
+    if [ -d "$default_memory_dir" ] && [ ! -L "$default_memory_dir" ]; then
+        info "Found existing memory files in $default_memory_dir"
+        "$SCRIPT_DIR/lib/merge-memory.sh" "$default_memory_dir" "$target_repo"
     else
-        warn "$settings_file not found — skipping hook install"
+        info "No existing memory directory found -- starting fresh"
     fi
 }
 
 # ============================================================
-# init-hub: run on the machine that will host the bare repo
+# init: first machine — create GitHub repo + git-crypt + push
 # ============================================================
-cmd_init_hub() {
+cmd_init() {
     parse_args "$@"
-    generate_config
-    load_config "$CONFIG_YAML"
+    check_prereqs
+    check_git_crypt
 
-    # Step 1: Create bare repo (locally — this IS the hub)
-    # HUB_BARE_REPO is already ~ expanded by load_config
-    local bare_path="$HUB_BARE_REPO"
-    info "Creating bare repo at $bare_path..."
-    if [ -d "$bare_path" ]; then
-        ok "Bare repo already exists"
+    local repo_name local_repo
+
+    if [ -n "$ARG_REPO_NAME" ]; then
+        repo_name="$ARG_REPO_NAME"
+        local_repo="${ARG_LOCAL_REPO:-~/dev/$repo_name}"
     else
-        mkdir -p "$(dirname "$bare_path")"
-        git init --bare "$bare_path"
-        ok "Bare repo created"
+        echo -e "${CYAN}=== Claude Memory Sync — Init ===${NC}"
+        echo ""
+        read -rp "GitHub repo name [kc_claude_memory]: " repo_name
+        repo_name="${repo_name:-kc_claude_memory}"
+        read -rp "Local clone path [~/dev/$repo_name]: " local_repo
+        local_repo="${local_repo:-~/dev/$repo_name}"
     fi
 
-    # Step 2: Clone bare repo locally
-    info "Setting up local repo at $LOCAL_REPO..."
-    if [ -d "$LOCAL_REPO/.git" ]; then
+    # Expand ~
+    local_repo="${local_repo/#\~/$HOME}"
+
+    # Step 1: Create GitHub private repo
+    info "Creating GitHub private repo: $repo_name..."
+    local repo_url
+    repo_url=$(gh repo create "$repo_name" --private --clone=false 2>&1) || {
+        # If repo already exists, get the URL
+        if echo "$repo_url" | grep -qi "already exists"; then
+            warn "Repo already exists on GitHub"
+            repo_url=$(gh repo view "$repo_name" --json url -q .url 2>/dev/null || true)
+        else
+            error "Failed to create repo: $repo_url"
+        fi
+    }
+
+    # Get the actual repo URL
+    if [ -z "$repo_url" ] || ! echo "$repo_url" | grep -q "github.com"; then
+        repo_url=$(gh repo view "$repo_name" --json url -q .url 2>/dev/null || true)
+    fi
+
+    if [ -z "$repo_url" ]; then
+        error "Could not determine repo URL. Check 'gh repo list' and try again."
+    fi
+    ok "GitHub repo: $repo_url"
+
+    # Step 2: Init local repo
+    info "Setting up local repo at $local_repo..."
+    if [ -d "$local_repo/.git" ]; then
         ok "Local repo already exists"
     else
-        mkdir -p "$LOCAL_REPO"
-        cd "$LOCAL_REPO"
-        git init
-        git remote add origin "$bare_path"
-        ok "Local repo initialized"
+        mkdir -p "$local_repo"
+        git init "$local_repo"
     fi
 
-    # Ensure memory repo ignores sync runtime files
-    if [ ! -f "$LOCAL_REPO/.gitignore" ]; then
-        cat > "$LOCAL_REPO/.gitignore" <<'GITIGNORE'
-.sync.sh
+    cd "$local_repo"
+
+    # Set remote
+    if git remote get-url origin >/dev/null 2>&1; then
+        git remote set-url origin "$repo_url"
+    else
+        git remote add origin "$repo_url"
+    fi
+
+    # Step 3: git-crypt init + export key
+    local key_file="$local_repo/.git/git-crypt-key"
+    if [ -f "$key_file" ]; then
+        ok "git-crypt already initialized"
+    else
+        info "Initializing git-crypt..."
+        git-crypt init
+        git-crypt export-key "$key_file"
+        ok "git-crypt initialized, key exported to $key_file"
+    fi
+
+    # Step 4: .gitattributes for encryption
+    if [ ! -f "$local_repo/.gitattributes" ]; then
+        cat > "$local_repo/.gitattributes" <<'ATTR'
+*.md filter=git-crypt diff=git-crypt
+.gitattributes !filter !diff
+ATTR
+        ok "Created .gitattributes (encrypts *.md files)"
+    fi
+
+    # .gitignore for the memory repo
+    if [ ! -f "$local_repo/.gitignore" ]; then
+        cat > "$local_repo/.gitignore" <<'GITIGNORE'
+.DS_Store
 .sync.lock
 .sync.lock.d
-.common.sh
-.config.yaml
-.DS_Store
 GITIGNORE
     fi
 
-    # Step 3: Copy existing memory files into repo and rebuild index
-    if [ -d "$LOCAL_MEMORY_DIR" ] && [ ! -L "$LOCAL_MEMORY_DIR" ]; then
-        info "Copying existing memory files..."
-        cp -n "$LOCAL_MEMORY_DIR"/*.md "$LOCAL_REPO/" 2>/dev/null || true
-        "$SCRIPT_DIR/lib/merge-memory.sh" "$LOCAL_MEMORY_DIR" "$LOCAL_REPO"
-    else
-        info "No existing memory directory found — starting fresh"
-    fi
+    # Step 5: Migrate existing memory files
+    migrate_existing_memory "$local_repo"
 
-    # Step 5: Initial commit + push
-    cd "$LOCAL_REPO"
+    # Step 6: Initial commit + push
+    cd "$local_repo"
     git add -A
     if ! git diff --cached --quiet 2>/dev/null; then
         git commit -m "Initial memory from $(hostname)"
@@ -244,98 +244,143 @@ GITIGNORE
         git push -u origin main
         ok "Initial commit pushed"
     else
-        ok "No new files to commit"
+        if git log --oneline -1 >/dev/null 2>&1; then
+            ok "No new files to commit"
+        else
+            # Empty repo, need at least one commit
+            git commit --allow-empty -m "Initial commit"
+            git branch -M main
+            git push -u origin main
+            ok "Empty initial commit pushed"
+        fi
     fi
 
-    # Step 6: Symlink
-    setup_symlink
+    # Step 7: Save config
+    local config_file="$SCRIPT_DIR/config.sh"
+    cat > "$config_file" <<CONF
+# Claude Memory Sync Configuration
+REPO_URL="$repo_url"
+LOCAL_REPO="$local_repo"
+CONF
+    ok "Config saved to $config_file"
 
-    # Step 7: Hook
-    install_hook
+    # Step 8: Configure Claude Code settings
+    configure_settings "$local_repo"
 
     echo ""
-    echo -e "${GREEN}=== Hub Setup Complete ===${NC}"
+    echo -e "${GREEN}=== Init Complete ===${NC}"
     echo ""
-    echo "Bare repo:  $bare_path"
-    echo "Local repo: $LOCAL_REPO"
-    echo "Memory dir: $LOCAL_MEMORY_DIR -> $LOCAL_REPO"
+    echo "Repo:       $repo_url"
+    echo "Local:      $local_repo"
+    echo "Key file:   $key_file"
+    echo ""
+    echo -e "${YELLOW}IMPORTANT: Back up the key file!${NC}"
+    echo "Without this key, you cannot decrypt memory on other machines."
+    echo "Copy it to a safe location (USB drive, password manager, etc.):"
+    echo ""
+    echo "  scp $key_file other-machine:/tmp/git-crypt-key"
     echo ""
     echo "Next: run './setup.sh join' on your other machines."
     echo ""
 }
 
 # ============================================================
-# join: run on spoke machines to connect to the hub
+# join: additional machines — clone + unlock + merge
 # ============================================================
 cmd_join() {
     parse_args "$@"
-    generate_config
-    load_config "$CONFIG_YAML"
+    check_prereqs
+    check_git_crypt
 
-    # Step 1: Verify SSH connection to hub
-    info "Testing SSH connection to $REMOTE..."
-    if hub_reachable; then
-        ok "SSH connection successful"
+    local repo_url key_file local_repo
+
+    if [ -n "$ARG_REPO_URL" ] && [ -n "$ARG_KEY_FILE" ]; then
+        repo_url="$ARG_REPO_URL"
+        key_file="$ARG_KEY_FILE"
+        local_repo="${ARG_LOCAL_REPO:-~/dev/kc_claude_memory}"
     else
-        error "Cannot connect to $REMOTE. Set up passwordless SSH first:
-  ssh-copy-id -i ${SSH_KEY}.pub $REMOTE"
+        echo -e "${CYAN}=== Claude Memory Sync — Join ===${NC}"
+        echo ""
+        read -rp "GitHub repo URL: " repo_url
+        read -rp "Path to git-crypt key file: " key_file
+        read -rp "Local clone path [~/dev/kc_claude_memory]: " local_repo
+        local_repo="${local_repo:-~/dev/kc_claude_memory}"
     fi
 
-    # Step 2: Verify bare repo exists on hub
-    info "Checking bare repo on hub..."
-    if $SSH_CMD "$REMOTE" "[ -d $HUB_BARE_REPO_RAW ]" 2>/dev/null; then
-        ok "Bare repo found on hub"
-    else
-        error "Bare repo not found at $REMOTE:$HUB_BARE_REPO_RAW
-  Run './setup.sh init-hub' on the hub machine first."
+    # Expand ~
+    local_repo="${local_repo/#\~/$HOME}"
+    key_file="${key_file/#\~/$HOME}"
+
+    if [ ! -f "$key_file" ]; then
+        error "Key file not found: $key_file"
     fi
 
-    # Step 3: Clone from hub
-    info "Setting up local repo at $LOCAL_REPO..."
-    if [ -d "$LOCAL_REPO/.git" ]; then
+    # Step 1: Clone repo
+    info "Cloning repo to $local_repo..."
+    if [ -d "$local_repo/.git" ]; then
         ok "Local repo already exists"
-        cd "$LOCAL_REPO"
+        cd "$local_repo"
         git pull origin main 2>/dev/null || true
     else
-        git clone "$REMOTE:$HUB_BARE_REPO_RAW" "$LOCAL_REPO"
-        cd "$LOCAL_REPO"
-        ok "Cloned from hub"
+        git clone "$repo_url" "$local_repo"
+        cd "$local_repo"
+        ok "Cloned from GitHub"
     fi
 
-    # Step 4: Merge local memory files into repo
-    if [ -d "$LOCAL_MEMORY_DIR" ] && [ ! -L "$LOCAL_MEMORY_DIR" ]; then
-        info "Merging local memory files..."
-        "$SCRIPT_DIR/lib/merge-memory.sh" "$LOCAL_MEMORY_DIR" "$LOCAL_REPO"
-
-        # Commit and push merged files
-        cd "$LOCAL_REPO"
-        git add -A
-        if ! git diff --cached --quiet 2>/dev/null; then
-            git commit -m "Merge memory from $(hostname)"
-            git push origin main
-            ok "Merged memory pushed to hub"
+    # Step 2: Unlock with git-crypt
+    info "Unlocking encrypted files..."
+    if git-crypt unlock "$key_file" 2>/dev/null; then
+        ok "Repository unlocked"
+    else
+        # May already be unlocked
+        if git-crypt status >/dev/null 2>&1; then
+            ok "Repository already unlocked"
+        else
+            error "Failed to unlock repository. Is the key file correct?"
         fi
     fi
 
-    # Step 5: Symlink
-    setup_symlink
+    # Step 3: Merge local memory files
+    migrate_existing_memory "$local_repo"
 
-    # Step 6: Hook
-    install_hook
+    # Commit and push merged files
+    cd "$local_repo"
+    git add -A
+    if ! git diff --cached --quiet 2>/dev/null; then
+        git commit -m "Merge memory from $(hostname)"
+        git pull --rebase -X theirs origin main 2>/dev/null \
+            || git rebase --abort 2>/dev/null || true
+        git push origin main
+        ok "Merged memory pushed"
+    fi
+
+    # Step 4: Save config
+    local config_file="$SCRIPT_DIR/config.sh"
+    cat > "$config_file" <<CONF
+# Claude Memory Sync Configuration
+REPO_URL="$repo_url"
+LOCAL_REPO="$local_repo"
+CONF
+    ok "Config saved to $config_file"
+
+    # Step 5: Configure Claude Code settings
+    configure_settings "$local_repo"
 
     echo ""
     echo -e "${GREEN}=== Join Complete ===${NC}"
     echo ""
-    echo "Hub:        $REMOTE:$HUB_BARE_REPO_RAW"
-    echo "Local repo: $LOCAL_REPO"
-    echo "Memory dir: $LOCAL_MEMORY_DIR -> $LOCAL_REPO"
+    echo "Repo:       $repo_url"
+    echo "Local:      $local_repo"
     echo ""
     echo "Memory will auto-sync when Claude Code writes/edits memory files."
-    if [ -n "$(ls "$LOCAL_REPO"/*_conflict.md 2>/dev/null)" ]; then
+    if ls "$local_repo"/*_conflict.md >/dev/null 2>&1; then
         echo ""
-        warn "Conflict files found — review and merge:"
-        ls "$LOCAL_REPO"/*_conflict.md 2>/dev/null
+        warn "Conflict files found -- review and merge:"
+        ls "$local_repo"/*_conflict.md 2>/dev/null
     fi
+    echo ""
+    echo -e "${YELLOW}TIP: Delete the key file from its transfer location for security:${NC}"
+    echo "  rm $key_file"
     echo ""
 }
 
@@ -346,7 +391,7 @@ COMMAND="${1:-}"
 shift || true
 
 case "$COMMAND" in
-    init-hub) cmd_init_hub "$@" ;;
-    join)     cmd_join "$@" ;;
-    *)        usage ;;
+    init) cmd_init "$@" ;;
+    join) cmd_join "$@" ;;
+    *)    usage ;;
 esac
